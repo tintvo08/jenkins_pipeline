@@ -1,0 +1,73 @@
+node('use1-legacy') {
+    cleanWs()
+    currentBuild.result = 'SUCCESS'
+    testContainer = null
+    reportPath = 'results/results.xml'
+    withEnv([
+            'BRANCH = ${BRANCH}'
+             ]) {
+        def status = 0
+        try {
+                stage('Git Checkout') {
+                    checkout changelog: false, poll: false,
+                        scm: [$class: 'GitSCM', branches: [[name: "*/${BRANCH}"]],
+                        extensions: [[$class: 'ScmName', name: 'CC-System']],
+                        submoduleCfg: [], doGenerateSubmoduleConfigurations: false,
+                        userRemoteConfigs: [[credentialsId: 'a9069e78-f96f-451b-a20d-e636df228be2',
+                        url: 'ssh://git@bitbucket.d.cylance.com:7999/cc/console-ui-tests.git']]]
+                    }
+                stage('Prepare Docker Image') {
+                        testContainer = docker.image("cloud-docker.d.cylance.com/cylance.test.cloud.docker:0.2.1")
+                        testContainer.pull()
+                    }
+                stage('Run Pylint') {
+                    testContainer.inside('-u root') {
+                        status = sh returnStatus: true, script: """
+                            pip3 install pylint
+                            pip3 install -I -r requirements.txt --extra-index-url https://pypi.org/simple --extra-index-url https://artifactory.ops-use1.cylance.com/artifactory/api/pypi/cylance-test/simple --extra-index-url https://artifactory.ops-use1.cylance.com/artifactory/api/pypi/infinity-pypi/simple  --trusted-host pythonhosted.org --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host artifactory.ops-use1.cylance.com
+                            python3 -m pylint common --rcfile=.pylintrc >> pylint.log || echo 'pylint exited'
+                            python3 -m pylint tests --rcfile=.pylintrc >> pylint.log || echo 'pylint exited'
+                            mkdir results
+                            cp pylint.log results/pylint.log
+                            """
+                    }
+                stage('Run Unit Tests') {
+                    testContainer.inside('-u root') {
+                        status = sh returnStatus: true, script: """
+                            pip3 install -I -r requirements.txt --extra-index-url https://pypi.org/simple --extra-index-url https://artifactory.ops-use1.cylance.com/artifactory/api/pypi/cylance-test/simple --extra-index-url https://artifactory.ops-use1.cylance.com/artifactory/api/pypi/infinity-pypi/simple  --trusted-host pythonhosted.org --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host artifactory.ops-use1.cylance.com
+                            python3 -m pytest common/tests -m unit -n 5 --junitxml=results/results.xml
+                            """
+                    }
+                }
+                stage('Publish Results') {
+                        archiveArtifacts artifacts: 'results/**'
+                        junit allowEmptyResults: true, keepLongStdio: true, testResults: reportPath
+                        if (status != 0) {
+                            error(status.toString())
+                            currentBuild.result = "FAILURE"
+                        }
+                }
+                step([
+                        $class                     : 'WarningsPublisher',
+                        parserConfigurations       : [[
+                                parserName: 'PYLint',
+                                pattern   : 'pylint.log'
+                                      ]],
+                        unstableTotalAll           : '0',
+                        usePreviousBuildAsReference: true
+                    ])
+                }
+        } catch(err) {
+            println "Catch Exception" + err
+            currentBuild.result = "FAILURE"
+        }
+        finally {
+            stage('Notification') {
+                msg_color = 'GREEN'
+                if (currentBuild.result == "FAILURE") {
+                    msg_color = 'RED'
+                }
+            }
+        }
+    }
+}
